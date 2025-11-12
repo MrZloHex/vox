@@ -1,5 +1,6 @@
 package vox
 
+/*
 import (
 	"context"
 	"log/slog"
@@ -37,3 +38,4 @@ func (n *NLU) Process(text string) (string, error) {
 	slog.Info("NLU response ready")
 	return resp.Choices[0].Message.Content, nil
 }
+*/

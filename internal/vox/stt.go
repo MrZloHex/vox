@@ -1,5 +1,6 @@
 package vox
 
+/*
 import (
 	"bytes"
 	"os/exec"
@@ -26,3 +27,4 @@ func (s *STT) Transcribe(audioFile string) (string, error) {
 
 	return out.String(), nil
 }
+*/
