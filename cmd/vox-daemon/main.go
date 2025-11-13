@@ -17,6 +17,7 @@ import (
 	"vox/internal/audio"
 	"vox/internal/ipc"
 	"vox/internal/nlu"
+	"vox/internal/tts"
 	"vox/pkg/stt"
 
 	"golang.org/x/net/proxy"
@@ -138,6 +139,10 @@ func handleTrigger(rec *audio.Recorder, tr *stt.Transcriber, api openai.Client) 
 		fmt.Println("answer: ", out.Answer)
 	}
 	fmt.Println("──────────────────────")
+
+	if err := tts.Speak(out.Answer); err != nil {
+		fmt.Println("[vox] tts error:", err)
+	}
 }
 
 /**
