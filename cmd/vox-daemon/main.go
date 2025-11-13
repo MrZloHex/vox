@@ -17,6 +17,7 @@ import (
 	"vox/internal/audio"
 	"vox/internal/ipc"
 	"vox/internal/nlu"
+	"vox/internal/notify"
 	"vox/internal/tts"
 	"vox/pkg/stt"
 
@@ -96,6 +97,9 @@ func main() {
 }
 
 func handleTrigger(rec *audio.Recorder, tr *stt.Transcriber, api openai.Client) {
+	go notify.Beep()
+	notify.SwayNotify("Listening...")
+
 	fmt.Println("[vox] trigger received")
 
 	// --- record with silence detection ---

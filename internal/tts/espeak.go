@@ -30,17 +30,17 @@ import (
 )
 
 func Speak(text string) error {
-    if text == "" {
-        return nil
-    }
+	if text == "" {
+		return nil
+	}
 
-    ctext := C.CString(text)
-    defer C.free(unsafe.Pointer(ctext))
+	ctext := C.CString(text)
+	defer C.free(unsafe.Pointer(ctext))
 
-    rc := C.espeak_say(ctext)
-    if rc != 0 {
-        return fmt.Errorf("espeak_say failed: %d", int(rc))
-    }
+	rc := C.espeak_say(ctext)
+	if rc != 0 {
+		return fmt.Errorf("espeak_say failed: %d", int(rc))
+	}
 
-    return nil
+	return nil
 }
