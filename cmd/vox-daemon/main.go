@@ -2,14 +2,14 @@ package main
 
 import (
 	"context"
-	"fmt"
-	"net"
-	"net/http"
 	"os"
 	"time"
 
 	"github.com/joho/godotenv"
 	cli "github.com/spf13/pflag"
+
+	"github.com/lmittmann/tint"
+	log "log/slog"
 
 	openai "github.com/openai/openai-go/v3"
 	"github.com/openai/openai-go/v3/option"
@@ -18,152 +18,9 @@ import (
 	"vox/internal/ipc"
 	"vox/internal/nlu"
 	"vox/internal/notify"
+	"vox/internal/proxy"
 	"vox/internal/tts"
 	"vox/pkg/stt"
-
-	"golang.org/x/net/proxy"
-)
-
-func newSocksClient(socksAddr string) (*http.Client, error) {
-	dialer, err := proxy.SOCKS5("tcp", socksAddr, nil, proxy.Direct)
-	if err != nil {
-		return nil, err
-	}
-
-	transport := &http.Transport{
-		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-			return dialer.Dial(network, addr)
-		},
-	}
-
-	return &http.Client{
-		Transport: transport,
-		Timeout:   120 * time.Second,
-	}, nil
-}
-
-func main() {
-	fmt.Println("[vox] starting daemon...")
-
-	envFile := cli.StringP("env", "e", ".env", "Env file path")
-	cli.Parse()
-
-	godotenv.Load(*envFile)
-	apiKey := os.Getenv("OPENAI_API_KEY")
-	if apiKey == "" {
-		panic("OPENAI_API_KEY not set")
-	}
-
-	httpClient, err := newSocksClient("127.0.0.1:8888")
-	if err != nil {
-		panic(err)
-	}
-
-	client := openai.NewClient(
-		option.WithAPIKey(apiKey),
-		option.WithHTTPClient(httpClient),
-	)
-
-	// --- audio ---
-	rec := audio.NewRecorder()
-	if err := rec.Init(); err != nil {
-		panic(fmt.Errorf("audio init: %w", err))
-	}
-	defer rec.Close()
-
-	// --- whisper ---
-	whisper, err := stt.NewTranscriber("third_party/whisper.cpp/models/ggml-medium.bin")
-	if err != nil {
-		panic(fmt.Errorf("whisper load: %w", err))
-	}
-	defer whisper.Close()
-
-	fmt.Println("[vox] daemon ready")
-
-	// --- IPC server ---
-	if err := ipc.StartServer(func(msg ipc.ControlMessage) {
-		switch msg.Cmd {
-		case "trigger":
-			handleTrigger(rec, whisper, client)
-		default:
-			fmt.Println("[vox] unknown command:", msg.Cmd)
-		}
-	}); err != nil {
-		panic(fmt.Errorf("ipc server: %w", err))
-	}
-
-	// Block forever
-	select {}
-}
-
-func handleTrigger(rec *audio.Recorder, tr *stt.Transcriber, api openai.Client) {
-	go notify.Beep()
-	notify.SwayNotify("Listening...")
-
-	fmt.Println("[vox] trigger received")
-
-	// --- record with silence detection ---
-	pcm, err := rec.RecordAuto()
-	if err != nil {
-		fmt.Println("[vox] record error:", err)
-		return
-	}
-	fmt.Printf("[vox] recorded %d samples\n", len(pcm))
-
-	// --- transcribe ---
-	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
-	defer cancel()
-
-	res, err := tr.TranscribePCM(ctx, pcm, stt.Options{
-		Language: "auto",
-		Threads:  0,
-	})
-	if err != nil {
-		fmt.Println("[vox] whisper error:", err)
-		return
-	}
-
-	fmt.Println("[vox] transcript:", res.Text)
-
-	// --- NLU ---
-	out, err := nlu.Analyze(api, res.Text)
-	if err != nil {
-		fmt.Println("[vox] nlu error:", err)
-		return
-	}
-
-	// --- print result ---
-	fmt.Println("──────── VOX ────────")
-	fmt.Println("mode:   ", out.Mode)
-	fmt.Println("intent: ", out.Intent)
-	if len(out.Args) > 0 {
-		fmt.Println("args:   ", out.Args)
-	}
-	if out.Mode == "question" && out.Answer != "" {
-		fmt.Println("answer: ", out.Answer)
-	}
-	fmt.Println("──────────────────────")
-
-	if err := tts.Speak(out.Answer); err != nil {
-		fmt.Println("[vox] tts error:", err)
-	}
-}
-
-/**
-package main
-
-import (
-	"os"
-	"time"
-
-	"github.com/joho/godotenv"
-	"github.com/lmittmann/tint"
-	cli "github.com/spf13/pflag"
-	log "log/slog"
-
-	"github.com/openai/openai-go"
-
-	"vox/pkg/protocol"
 )
 
 var logLevelMap = map[string]log.Level{
@@ -175,7 +32,8 @@ var logLevelMap = map[string]log.Level{
 
 func main() {
 	envFile := cli.StringP("env", "e", ".env", "Env file path")
-	url := cli.StringP("url", "u", "ws://localhost:8092", "Url of hub")
+	// url := cli.StringP("url", "u", "ws://localhost:8092", "Url of hub")
+	proxy_addr := cli.StringP("proxy", "p", "127.0.0.1:8888", "Socks Proxy Address")
 	logLevel := cli.StringP("log", "l", "info", "Log level")
 	cli.Parse()
 
@@ -183,31 +41,112 @@ func main() {
 		Level: logLevelMap[*logLevel],
 	})))
 
+	log.Info("Booting up")
+
 	godotenv.Load(*envFile)
 	apiKey := os.Getenv("OPENAI_API_KEY")
 	if apiKey == "" {
-		log.Error("Failed to get API KEY")
+		log.Error("OPENAI_API_KEY not set")
 		os.Exit(1)
 	}
 
-	ptcl_cfg := protocol.PtclConfig{
-		Shard:   "VOX",
-		Url:     *url,
-		Reconn:  5,
-		Timeout: 3 * time.Second,
-	}
+	log.Debug("Loaded API Key")
 
-	ptcl, err := protocol.NewProtocol(ptcl_cfg)
+	httpClient, err := proxy.NewSocksClient(*proxy_addr)
 	if err != nil {
-		log.Error("Failed to init protocol")
+		log.Error("Failed to dial socks proxy", "proxy", *proxy_addr, "err", err)
 		os.Exit(1)
 	}
 
-	go ptcl.Run()
+	log.Debug("Loaded proxy")
 
-	for {
+	client := openai.NewClient(
+		option.WithAPIKey(apiKey),
+		option.WithHTTPClient(httpClient),
+	)
 
+	rec := audio.NewRecorder()
+	err = rec.Init()
+	if err != nil {
+		log.Error("Failed to init audio", "err", err)
+		os.Exit(1)
 	}
+	defer rec.Close()
+
+	log.Debug("Loaded recorder")
+
+	whisper, err := stt.NewTranscriber("third_party/whisper.cpp/models/ggml-medium.bin")
+	if err != nil {
+		log.Error("Failed to ini whisper", "err", err)
+		os.Exit(1)
+	}
+	defer whisper.Close()
+
+	log.Debug("Loaded whisper")
+	log.Info("Boot up - successful")
+
+	if err := ipc.StartServer(func(msg ipc.ControlMessage) {
+		switch msg.Cmd {
+		case "trigger":
+			handleTrigger(rec, whisper, client)
+		default:
+			log.Warn("Unknown command", "cmd", msg.Cmd)
+		}
+	}); err != nil {
+		log.Error("Failed ipc server", "err", err)
+		os.Exit(1)
+	}
+
+	select {}
 }
 
-*/
+func handleTrigger(rec *audio.Recorder, tr *stt.Transcriber, api openai.Client) {
+	notify.Beep()
+	notify.SwayNotify("Listening...")
+
+	log.Info("Starting listening")
+
+	pcm, err := rec.RecordAuto()
+	if err != nil {
+		log.Error("Failed to recotd", "err", err)
+		return
+	}
+
+	log.Info("Recorded", "samples", len(pcm))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	res, err := tr.TranscribePCM(ctx, pcm, stt.Options{
+		Language: "auto",
+		Threads:  0,
+	})
+	if err != nil {
+		log.Error("Failed to transribe", "err", err)
+		return
+	}
+
+	log.Info("Transcribed", "text", res.Text)
+
+	out, err := nlu.Analyze(api, res.Text)
+	if err != nil {
+		log.Error("Failed to call API", "err", err)
+		return
+	}
+
+	log.Info("──────── VOX ────────")
+	log.Info("mode:   ", out.Mode)
+	log.Info("intent: ", out.Intent)
+	if len(out.Args) > 0 {
+		log.Info("args:   ", out.Args)
+	}
+	if out.Mode == "question" && out.Answer != "" {
+		log.Info("answer: ", out.Answer)
+	}
+	log.Info("──────────────────────")
+
+	if err := tts.Speak(out.Answer); err != nil {
+		log.Error("Failed to voice out", "err", err)
+		return
+	}
+}

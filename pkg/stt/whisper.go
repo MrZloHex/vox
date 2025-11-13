@@ -8,6 +8,7 @@ import (
 	"runtime"
 	"time"
 
+	//bind "github.com/ggerganov/whisper.cpp/bindings/go"
 	"github.com/ggerganov/whisper.cpp/bindings/go/pkg/whisper"
 )
 
