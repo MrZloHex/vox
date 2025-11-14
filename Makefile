@@ -41,5 +41,6 @@ whisper:
 
 .PHONY: build
 build: whisper
+	gofmt -s -w .
 	CGO_CFLAGS='$(CGO_CFLAGS_COMMON)' CGO_CXXFLAGS='$(CGO_CXXFLAGS_COMMON)' CGO_LDFLAGS='$(CGO_LDFLAGS_COMMON)' \
 		go build -o bin/vox-daemon ./cmd/vox-daemon

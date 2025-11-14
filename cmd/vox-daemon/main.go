@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/joho/godotenv"
@@ -29,6 +30,13 @@ var logLevelMap = map[string]log.Level{
 	"warn":  log.LevelWarn,
 	"error": log.LevelError,
 }
+
+var (
+	sttMu     sync.Mutex
+	recMu     sync.Mutex
+	recording bool
+	stopChan  chan struct{}
+)
 
 func main() {
 	envFile := cli.StringP("env", "e", ".env", "Env file path")
@@ -88,7 +96,7 @@ func main() {
 	if err := ipc.StartServer(func(msg ipc.ControlMessage) {
 		switch msg.Cmd {
 		case "trigger":
-			handleTrigger(rec, whisper, client)
+			handleToggleTrigger(rec, whisper, client)
 		default:
 			log.Warn("Unknown command", "cmd", msg.Cmd)
 		}
@@ -100,37 +108,78 @@ func main() {
 	select {}
 }
 
-func handleTrigger(rec *audio.Recorder, tr *stt.Transcriber, api openai.Client) {
+func handleToggleTrigger(rec *audio.Recorder, tr *stt.Transcriber, api openai.Client) {
+	recMu.Lock()
+	defer recMu.Unlock()
+
+	if !recording {
+		log.Info("Warming up records")
+
+		recording = true
+		stopChan = make(chan struct{})
+
+		go func(stop <-chan struct{}) {
+			defer func() {
+				recMu.Lock()
+				recording = false
+				stopChan = nil
+				recMu.Unlock()
+
+				log.Info("Listening finished")
+			}()
+
+			handleSession(stop, rec, tr, api)
+		}(stopChan)
+
+	} else {
+		if stopChan != nil {
+			log.Info("Stopping listening by trigger")
+			close(stopChan)
+			stopChan = nil
+		}
+	}
+}
+
+func handleSession(stop <-chan struct{}, rec *audio.Recorder, tr *stt.Transcriber, api openai.Client) {
+	ctx_bg := context.Background()
+	d := audio.NewDucker([]string{"MonolithVox"}, 5)
+	d.DuckOthers(ctx_bg, 0.3, 400*time.Millisecond)
+	defer d.UnduckOthers(ctx_bg, 400*time.Millisecond)
+
 	notify.Beep()
 	notify.SwayNotify("Listening...")
-
 	log.Info("Starting listening")
+	defer log.Debug("Request handled")
 
-	pcm, err := rec.RecordAuto()
+	pcm, err := rec.RecordUntil(stop, 20*time.Second)
 	if err != nil {
-		log.Error("Failed to recotd", "err", err)
+		log.Error("record failed", "err", err)
 		return
 	}
+	log.Info("Recorded samples", "samples", len(pcm))
 
-	log.Info("Recorded", "samples", len(pcm))
+	d.UnduckOthers(ctx_bg, 400*time.Millisecond)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
+
+	log.Debug("Start transcripting")
 
 	res, err := tr.TranscribePCM(ctx, pcm, stt.Options{
 		Language: "auto",
 		Threads:  0,
 	})
 	if err != nil {
-		log.Error("Failed to transribe", "err", err)
+		log.Error("whisper transcribe failed", "err", err)
 		return
 	}
 
-	log.Info("Transcribed", "text", res.Text)
+	log.Info("Transcribed", "text", res.Text, "lang", res.Language)
+	log.Debug("Starting analyzing")
 
 	out, err := nlu.Analyze(api, res.Text)
 	if err != nil {
-		log.Error("Failed to call API", "err", err)
+		log.Error("nlu failed", "err", err)
 		return
 	}
 
@@ -145,8 +194,23 @@ func handleTrigger(rec *audio.Recorder, tr *stt.Transcriber, api openai.Client) 
 	}
 	log.Info("──────────────────────")
 
+	/*
+		ctxNLU := ctx
+		handled, err := mono.Dispatch(ctxNLU, log, nluRes)
+		if err != nil {
+			log.Error("mono dispatch error", slog.Any("err", err))
+		}
+		if handled {
+			return
+		}
+	*/
+
+	d.DuckOthers(ctx_bg, 0.3, 400*time.Millisecond)
+	log.Debug("Speaking out")
+
 	if err := tts.Speak(out.Answer); err != nil {
 		log.Error("Failed to voice out", "err", err)
 		return
 	}
+
 }

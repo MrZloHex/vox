@@ -1,6 +1,7 @@
 package audio
 
 import (
+	"errors"
 	"math"
 	"time"
 
@@ -69,6 +70,67 @@ func (r *Recorder) RecordAuto() ([]float32, error) {
 				out = append(out, buf...)
 			}
 		}
+	}
+
+	return out, nil
+}
+
+func (r *Recorder) RecordUntil(stop <-chan struct{}, maxDur time.Duration) ([]float32, error) {
+	const (
+		sampleRate = 16000
+	)
+
+	if maxDur <= 0 {
+		maxDur = 15 * time.Second
+	}
+
+	const frameSize = 1024
+
+	buf := make([]float32, frameSize)
+
+	stream, err := portaudio.OpenDefaultStream(
+		1, // in
+		0, // no out
+		float64(sampleRate),
+		len(buf),
+		buf,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer stream.Close()
+
+	if err := stream.Start(); err != nil {
+		return nil, err
+	}
+	defer stream.Stop()
+
+	deadline := time.Now().Add(maxDur)
+	out := make([]float32, 0, int(float64(sampleRate)*maxDur.Seconds()))
+
+	for {
+		// проверяем таймаут
+		if time.Now().After(deadline) {
+			break
+		}
+
+		// проверяем, не попросили ли стоп
+		select {
+		case <-stop:
+			// второй триггер — заканчиваем запись
+			return out, nil
+		default:
+		}
+
+		if err := stream.Read(); err != nil {
+			return nil, err
+		}
+
+		out = append(out, buf...)
+	}
+
+	if len(out) == 0 {
+		return nil, errors.New("no audio recorded")
 	}
 
 	return out, nil
