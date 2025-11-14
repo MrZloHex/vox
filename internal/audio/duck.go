@@ -28,14 +28,12 @@ type fadeTarget struct {
 	to   int
 }
 
-// Ducker отвечает за fade in/out ДРУГИХ потоков,
-// кроме тех, что помечены application.name из selfNames.
 type Ducker struct {
 	mu          sync.Mutex
 	active      bool
-	selfNames   []string    // application.name, которые НЕ трогаем
-	originalVol map[int]int // id -> исходный % громкости
-	minVolume   int         // минимальная громкость для чужих при duck
+	selfNames   []string
+	originalVol map[int]int
+	minVolume   int
 }
 
 func NewDucker(selfNames []string, minVolume int) *Ducker {
@@ -55,8 +53,6 @@ func NewDucker(selfNames []string, minVolume int) *Ducker {
 	return d
 }
 
-// DuckOthers: плавно уменьшает громкость всех "чужих" потоков:
-// target = current * factor (но не ниже minVolume).
 func (d *Ducker) DuckOthers(ctx context.Context, factor float64, duration time.Duration) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -114,7 +110,6 @@ func (d *Ducker) DuckOthers(ctx context.Context, factor float64, duration time.D
 	return nil
 }
 
-// UnduckOthers: плавно возвращает чужие потоки к исходным громкостям.
 func (d *Ducker) UnduckOthers(ctx context.Context, duration time.Duration) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -142,7 +137,6 @@ func (d *Ducker) UnduckOthers(ctx context.Context, duration time.Duration) error
 	for id, from := range curVol {
 		orig, ok := d.originalVol[id]
 		if !ok {
-			// поток появился уже после duck — можно игнорировать
 			continue
 		}
 
@@ -175,10 +169,8 @@ func (d *Ducker) isSelfStream(s streamInfo) bool {
 	return false
 }
 
-// fadeInputs делает ступенчатый fade для набора sink-input'ов.
 func fadeInputs(ctx context.Context, targets []fadeTarget, duration time.Duration) error {
 	if duration <= 0 {
-		// сразу выставляем целевые значения
 		for _, t := range targets {
 			if err := setSinkInputVolume(ctx, t.id, t.to); err != nil {
 				return fmt.Errorf("set volume id=%d: %w", t.id, err)
@@ -224,7 +216,6 @@ func fadeInputs(ctx context.Context, targets []fadeTarget, duration time.Duratio
 	return nil
 }
 
-// --- pactl helpers ---
 
 func listStreams(ctx context.Context) ([]streamInfo, error) {
 	cmd := exec.CommandContext(ctx, "pactl", "list", "sink-inputs")
@@ -277,7 +268,6 @@ func listStreams(ctx context.Context) ([]streamInfo, error) {
 			}
 
 			if strings.HasPrefix(line, "application.name =") && s.AppName == "" {
-				// application.name = "Firefox"
 				idx := strings.Index(line, "\"")
 				if idx >= 0 {
 					line = line[idx+1:]
