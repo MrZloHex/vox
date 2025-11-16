@@ -216,7 +216,6 @@ func fadeInputs(ctx context.Context, targets []fadeTarget, duration time.Duratio
 	return nil
 }
 
-
 func listStreams(ctx context.Context) ([]streamInfo, error) {
 	cmd := exec.CommandContext(ctx, "pactl", "list", "sink-inputs")
 	out, err := cmd.Output()
