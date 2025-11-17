@@ -20,7 +20,8 @@ import (
 	"vox/internal/nlu"
 	"vox/internal/notify"
 	"vox/internal/proxy"
-	"vox/internal/tts"
+	_ "vox/internal/tts"
+	"vox/pkg/protocol"
 	"vox/pkg/stt"
 )
 
@@ -40,7 +41,7 @@ var (
 
 func main() {
 	envFile := cli.StringP("env", "e", ".env", "Env file path")
-	// url := cli.StringP("url", "u", "ws://localhost:8092", "Url of hub")
+	url := cli.StringP("url", "u", "ws://192.168.0.69:8092", "Url of hub")
 	proxy_addr := cli.StringP("proxy", "p", "127.0.0.1:8888", "Socks Proxy Address")
 	logLevel := cli.StringP("log", "l", "info", "Log level")
 	cli.Parse()
@@ -91,12 +92,29 @@ func main() {
 	defer whisper.Close()
 
 	log.Debug("Loaded whisper")
+
+	ptcl_cfg := protocol.PtclConfig{
+		Shard:   "VOX",
+		Url:     *url,
+		Reconn:  5,
+		Timeout: 3 * time.Second,
+	}
+
+	ptcl, err := protocol.NewProtocol(ptcl_cfg)
+	if err != nil {
+		log.Error("Failed to init protocol", "err", err)
+		os.Exit(1)
+	}
+	go ptcl.Run()
+
+	log.Debug("Loaded protocol")
+
 	log.Info("Boot up - successful")
 
 	if err := ipc.StartServer(func(msg ipc.ControlMessage) {
 		switch msg.Cmd {
 		case "trigger":
-			handleToggleTrigger(rec, whisper, client)
+			handleToggleTrigger(rec, whisper, client, ptcl)
 		default:
 			log.Warn("Unknown command", "cmd", msg.Cmd)
 		}
@@ -108,7 +126,7 @@ func main() {
 	select {}
 }
 
-func handleToggleTrigger(rec *audio.Recorder, tr *stt.Transcriber, api openai.Client) {
+func handleToggleTrigger(rec *audio.Recorder, tr *stt.Transcriber, api openai.Client, ptcl *protocol.Protocol) {
 	recMu.Lock()
 	defer recMu.Unlock()
 
@@ -128,7 +146,7 @@ func handleToggleTrigger(rec *audio.Recorder, tr *stt.Transcriber, api openai.Cl
 				log.Info("Listening finished")
 			}()
 
-			handleSession(stop, rec, tr, api)
+			handleSession(stop, rec, tr, api, ptcl)
 		}(stopChan)
 
 	} else {
@@ -140,31 +158,39 @@ func handleToggleTrigger(rec *audio.Recorder, tr *stt.Transcriber, api openai.Cl
 	}
 }
 
-func handleSession(stop <-chan struct{}, rec *audio.Recorder, tr *stt.Transcriber, api openai.Client) {
+func handleSession(stop <-chan struct{}, rec *audio.Recorder, tr *stt.Transcriber, api openai.Client, ptcl *protocol.Protocol) {
 	ctx_bg := context.Background()
+
 	d := audio.NewDucker([]string{"MonolithVox"}, 5)
-	d.DuckOthers(ctx_bg, 0.3, 400*time.Millisecond)
-	defer d.UnduckOthers(ctx_bg, 400*time.Millisecond)
+	err := d.DuckOthers(ctx_bg, 0.3, 400*time.Millisecond)
+	if err != nil {
+		log.Error("Failed to duck outputs", "err", err)
+	}
+	log.Debug("Ducked audio")
 
 	notify.Beep()
 	notify.SwayNotify("Listening...")
+	log.Debug("Sent notification")
+
 	log.Info("Starting listening")
-	defer log.Debug("Request handled")
 
 	pcm, err := rec.RecordUntil(stop, 20*time.Second)
 	if err != nil {
 		log.Error("record failed", "err", err)
 		return
 	}
-	log.Info("Recorded samples", "samples", len(pcm))
+	log.Debug("Recored audio", "samples", len(pcm))
 
-	d.UnduckOthers(ctx_bg, 400*time.Millisecond)
+	err = d.UnduckOthers(ctx_bg, 400*time.Millisecond)
+	if err != nil {
+		log.Error("Failed to unduck outputs", "err", err)
+	}
+	log.Debug("Unducked audio")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
 	log.Debug("Start transcripting")
-
 	res, err := tr.TranscribePCM(ctx, pcm, stt.Options{
 		Language: "auto",
 		Threads:  0,
@@ -184,33 +210,33 @@ func handleSession(stop <-chan struct{}, rec *audio.Recorder, tr *stt.Transcribe
 	}
 
 	log.Info("──────── VOX ────────")
-	log.Info("mode:   ", out.Mode)
-	log.Info("intent: ", out.Intent)
-	if len(out.Args) > 0 {
-		log.Info("args:   ", out.Args)
-	}
-	if out.Mode == "question" && out.Answer != "" {
-		log.Info("answer: ", out.Answer)
-	}
+	log.Info("intent: ", "i", out.Intent)
+	log.Info("entities:   ", "e", out.Entities)
 	log.Info("──────────────────────")
 
-	/*
-		ctxNLU := ctx
-		handled, err := mono.Dispatch(ctxNLU, log, nluRes)
-		if err != nil {
-			log.Error("mono dispatch error", slog.Any("err", err))
-		}
-		if handled {
-			return
-		}
-	*/
-
-	d.DuckOthers(ctx_bg, 0.3, 400*time.Millisecond)
-	log.Debug("Speaking out")
-
-	if err := tts.Speak(out.Answer); err != nil {
-		log.Error("Failed to voice out", "err", err)
-		return
+	resp, err := nlu.Dispatch(out, ptcl)
+	if err != nil {
+		log.Error("Failed to dispatch", "err", err)
 	}
+	log.Debug("Dispatched request", "resp", resp)
 
+	err = d.DuckOthers(ctx_bg, 0.3, 400*time.Millisecond)
+	if err != nil {
+		log.Error("Failed to duck outputs", "err", err)
+	}
+	log.Debug("Ducked audio")
+
+	log.Debug("Speaking out")
+	// err = tts.Speak(out.Answer)
+	// if err != nil {
+	// 	log.Error("Failed to voice out", "err", err)
+	// }
+
+	err = d.UnduckOthers(ctx_bg, 400*time.Millisecond)
+	if err != nil {
+		log.Error("Failed to unduck outputs", "err", err)
+	}
+	log.Debug("Unducked audio")
+
+	log.Debug("Request handled")
 }
